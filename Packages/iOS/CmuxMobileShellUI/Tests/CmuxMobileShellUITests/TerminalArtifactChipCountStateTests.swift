@@ -68,6 +68,54 @@ struct TerminalArtifactChipCountStateTests {
         ).outcome == .reported(.init(count: 12, surfaceGeneration: 7)))
     }
 
+    @Test("gallery row total is authoritative over the legacy session total")
+    func galleryRowTotalWins() throws {
+        var state = TerminalArtifactChipCountState()
+        let request = try request(from: state.trigger(
+            localCount: 3,
+            surfaceGeneration: 7,
+            supportsSessionCount: true
+        ))
+
+        #expect(state.complete(
+            request,
+            galleryRowTotal: 5,
+            sessionTotal: 12,
+            currentSurfaceGeneration: 7,
+            freshestLocalCount: 3
+        ).outcome == .reported(.init(count: 5, surfaceGeneration: 7)))
+    }
+
+    @Test("failed scans hold the last authoritative gallery row total")
+    func failedScanHoldsLastGalleryRowTotal() throws {
+        var state = TerminalArtifactChipCountState()
+        let first = try request(from: state.trigger(
+            localCount: 3,
+            surfaceGeneration: 7,
+            supportsSessionCount: true
+        ))
+        #expect(state.complete(
+            first,
+            galleryRowTotal: 0,
+            sessionTotal: 12,
+            currentSurfaceGeneration: 7,
+            freshestLocalCount: 3
+        ).outcome == .reported(.init(count: 0, surfaceGeneration: 7)))
+
+        let second = try request(from: state.trigger(
+            localCount: 9,
+            surfaceGeneration: 8,
+            supportsSessionCount: true
+        ))
+        #expect(state.complete(
+            second,
+            galleryRowTotal: nil,
+            sessionTotal: nil,
+            currentSurfaceGeneration: 8,
+            freshestLocalCount: 9
+        ).outcome == .reported(.init(count: 0, surfaceGeneration: 8)))
+    }
+
     @Test("session-count triggers report the local count immediately and refine async")
     func sessionTriggersReportProvisionally() throws {
         var state = TerminalArtifactChipCountState()
@@ -127,6 +175,35 @@ struct TerminalArtifactChipCountStateTests {
             currentSurfaceGeneration: 8,
             freshestLocalCount: 2
         ).outcome == .reported(.init(count: 2, surfaceGeneration: 8)))
+    }
+
+    @Test("reset for a show-missing mode change forgets the authoritative total")
+    func showMissingModeResetForgetsAuthoritativeTotal() throws {
+        var state = TerminalArtifactChipCountState()
+        let seeded = try request(from: state.trigger(
+            localCount: 1,
+            surfaceGeneration: 10,
+            supportsSessionCount: true
+        ))
+        _ = state.complete(
+            seeded,
+            galleryRowTotal: 8,
+            sessionTotal: 12,
+            currentSurfaceGeneration: 10,
+            freshestLocalCount: 1
+        )
+
+        state.reset()
+
+        guard case .reportAndRequest(let provisional, _) = state.trigger(
+            localCount: 2,
+            surfaceGeneration: 11,
+            supportsSessionCount: true
+        ) else {
+            Issue.record("Expected reset state to use the local fallback")
+            throw UnexpectedAction()
+        }
+        #expect(provisional == .init(count: 2, surfaceGeneration: 11))
     }
 
     @Test("responses from an old state or surface generation are dropped")
