@@ -13,6 +13,7 @@ extension GhosttySurfaceRepresentable.Coordinator {
         func updateArtifactCountMode(
             artifactFilesEnabled: Bool,
             terminalFilesChipEnabled: Bool,
+            showMissingFiles: Bool,
             sessionArtifactCountEnabled: Bool
         ) -> Bool {
             let artifactChipGate = TerminalArtifactChipFeatureGate(
@@ -21,9 +22,11 @@ extension GhosttySurfaceRepresentable.Coordinator {
             )
             let changed = self.artifactFilesEnabled != artifactFilesEnabled
                 || self.artifactChipGate != artifactChipGate
+                || self.showMissingFiles != showMissingFiles
                 || self.sessionArtifactCountEnabled != sessionArtifactCountEnabled
             self.artifactFilesEnabled = artifactFilesEnabled
             self.artifactChipGate = artifactChipGate
+            self.showMissingFiles = showMissingFiles
             self.sessionArtifactCountEnabled = sessionArtifactCountEnabled
             guard changed else { return false }
 
@@ -75,27 +78,30 @@ extension GhosttySurfaceRepresentable.Coordinator {
             let workspaceID = workspaceID
             let surfaceID = surfaceID
             let artifactChipGate = artifactChipGate
+            let showMissingFiles = showMissingFiles
             artifactCountTaskRequest = request
             artifactCountTask = Task { @MainActor [weak self, weak surfaceView] in
-                let sessionTotal: Int?
+                let response: TerminalArtifactScanResponse?
                 do {
-                    sessionTotal = try await artifactChipGate.performScan { [weak self] in
+                    response = try await artifactChipGate.performScan { [weak self] in
                         guard let source = self?.store?.makeChatEventSource() else { return nil }
-                        let response = try await source.terminalArtifactScan(
+                        return try await source.terminalArtifactScan(
                             workspaceID: workspaceID,
                             surfaceID: surfaceID,
-                            countOnly: true
+                            visibleOnly: true,
+                            countOnly: true,
+                            includeMissing: showMissingFiles
                         )
-                        return response.sessionArtifactTotal
                     }
                 } catch {
-                    sessionTotal = nil
+                    response = nil
                 }
 
                 guard let self, let surfaceView else { return }
                 let completion = self.artifactCountState.complete(
                     request,
-                    sessionTotal: sessionTotal,
+                    galleryRowTotal: response?.galleryRowTotal,
+                    sessionTotal: response?.sessionArtifactTotal,
                     currentSurfaceGeneration: surfaceView.visibleArtifactCountGeneration,
                     freshestLocalCount: self.freshestLocalArtifactCount
                 )

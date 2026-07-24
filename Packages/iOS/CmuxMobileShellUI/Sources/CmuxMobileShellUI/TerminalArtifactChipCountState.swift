@@ -50,10 +50,11 @@ struct TerminalArtifactChipCountState: Sendable {
     private var inFlight: Request?
     private var trailing: Pending?
     private var consecutiveRearmCount = 0
-    /// Last successful session total, held across transient scan failures so
+    /// Last successful gallery total (or positive legacy session total), held
+    /// across transient scan failures so
     /// the chip does not regress to the viewport-only count (which oscillates
     /// while output streams) whenever one RPC drops.
-    private var lastSessionTotal: Int?
+    private var lastAuthoritativeTotal: Int?
 
     static let maxConsecutiveRearms = 3
 
@@ -62,7 +63,7 @@ struct TerminalArtifactChipCountState: Sendable {
         inFlight = nil
         trailing = nil
         consecutiveRearmCount = 0
-        lastSessionTotal = nil
+        lastAuthoritativeTotal = nil
     }
 
     mutating func trigger(
@@ -89,17 +90,18 @@ struct TerminalArtifactChipCountState: Sendable {
     }
 
     /// The count the chip should show for a fresh local scan: the last known
-    /// session total wins while the session has artifacts, the viewport-only
-    /// count otherwise.
+    /// authoritative total wins when one exists, the viewport-only count
+    /// otherwise.
     private func displayCount(forLocalCount localCount: Int) -> Int {
-        if let lastSessionTotal, lastSessionTotal > 0 {
-            return lastSessionTotal
+        if let lastAuthoritativeTotal {
+            return lastAuthoritativeTotal
         }
         return localCount
     }
 
     mutating func complete(
         _ request: Request,
+        galleryRowTotal: Int? = nil,
         sessionTotal: Int?,
         currentSurfaceGeneration: UInt64,
         freshestLocalCount: Int
@@ -109,8 +111,12 @@ struct TerminalArtifactChipCountState: Sendable {
             return .stale
         }
         inFlight = nil
-        if let sessionTotal {
-            lastSessionTotal = sessionTotal
+        if let galleryRowTotal {
+            lastAuthoritativeTotal = galleryRowTotal
+        } else if let sessionTotal {
+            // Preserve the old-Mac behavior exactly: positive Session totals
+            // win, while zero falls back to the local viewport count.
+            lastAuthoritativeTotal = sessionTotal > 0 ? sessionTotal : nil
         }
 
         let outcome: CompletionOutcome

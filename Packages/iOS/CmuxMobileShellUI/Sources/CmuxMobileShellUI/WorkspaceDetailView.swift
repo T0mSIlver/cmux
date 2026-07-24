@@ -87,6 +87,9 @@ struct WorkspaceDetailView: View {
     var terminalFilesChipEnabled: Bool {
         displaySettings.terminalFilesChipEnabled
     }
+    var showMissingFiles: Bool {
+        displaySettings.showMissingFiles
+    }
     var terminalFolderTapEnabled: Bool {
         displaySettings.terminalFolderTapEnabled
     }
