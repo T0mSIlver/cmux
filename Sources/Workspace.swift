@@ -2554,6 +2554,36 @@ final class Workspace: Identifiable, ObservableObject {
         remoteLastErrorFingerprint = nil
     }
 
+    /// Sidebar log sources that report the remote connection lifecycle, and are
+    /// therefore superseded once the workspace connects. `remote-forward` is
+    /// deliberately absent: port-conflict warnings describe forwarding state,
+    /// not whether the connection came up.
+    private static let remoteConnectionLifecycleLogSources: Set<String> = [
+        "remote",
+        "remote-proxy",
+        "remote-daemon",
+    ]
+
+    /// Retracts connection-lifecycle failures that a later success made stale.
+    ///
+    /// The sidebar workspace row renders `logEntries.last`, and recovery
+    /// appends nothing newer, so without this any transport bounce or transient
+    /// bootstrap failure stays pinned to the row long after the workspace is
+    /// healthy — and is restored from the session snapshot on the next launch.
+    ///
+    /// Retraction is keyed on *supersession*, not on the failure's category: a
+    /// bootstrap failure that a later attempt recovered from is exactly as
+    /// stale as a proxy bounce, and a failure that still matters cannot be
+    /// followed by a healthy daemon and a connected workspace. `statusEntries`
+    /// is untouched; `applyRemoteConnectionStateUpdate` owns that key.
+    private func clearRecoveredRemoteConnectionSidebarLogEntries() {
+        logEntries.removeAll { entry in
+            guard let source = entry.source,
+                  Self.remoteConnectionLifecycleLogSources.contains(source) else { return false }
+            return entry.level == .error || entry.level == .warning
+        }
+    }
+
     private func remoteNotificationCooldownKey(target: String) -> String? {
         let rawTarget = (remoteConfiguration?.destination ?? target)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -6350,6 +6380,9 @@ final class Workspace: Identifiable, ObservableObject {
         if state == .connected {
             statusEntries.removeValue(forKey: Self.remoteErrorStatusKey)
             remoteLastErrorFingerprint = nil
+            // The status entry was already retracted here; the log entries that
+            // mirror it were not, and they are what the workspace row shows.
+            clearRecoveredRemoteConnectionSidebarLogEntries()
         }
     }
 
@@ -6358,6 +6391,13 @@ final class Workspace: Identifiable, ObservableObject {
         applyBrowserRemoteWorkspaceStatusToPanels()
         guard status.state == .error else {
             remoteLastDaemonErrorFingerprint = nil
+            // A completed bootstrap retracts the failures it superseded.
+            // Without this the sidebar row keeps rendering the last one as
+            // `logEntries.last` — recovery appends nothing newer — and the
+            // session snapshot restores it on the next launch.
+            if status.state == .ready {
+                clearRecoveredRemoteConnectionSidebarLogEntries()
+            }
             return
         }
         let trimmedDetail = status.detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "remote daemon error"
