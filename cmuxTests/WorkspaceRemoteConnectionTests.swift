@@ -3612,6 +3612,178 @@ final class WorkspaceRemoteConnectionTests: XCTestCase {
             "error"
         )
     }
+
+    /// A daemon-transport bounce that the coordinator recovers on its own must
+    /// not leave a stale error behind. The sidebar row renders
+    /// `logEntries.last`, and recovery appends no newer entry, so a
+    /// non-retracted daemon error stays on the workspace row indefinitely — and
+    /// is restored from the session snapshot on the next launch — even though
+    /// the workspace never stopped working. The connection-state path already
+    /// self-heals on `.connected`; the daemon-status path did not.
+    @MainActor
+    func testRecoveredDaemonTransportBounceClearsStaleSidebarError() {
+        let workspace = Workspace()
+        let config = WorkspaceRemoteConfiguration(
+            destination: "sandbox-vpn",
+            port: nil,
+            identityFile: nil,
+            sshOptions: [],
+            localProxyPort: nil,
+            relayPort: 64906,
+            relayID: String(repeating: "c", count: 16),
+            relayToken: String(repeating: "d", count: 64),
+            localSocketPath: "/tmp/cmux-debug-test.sock",
+            terminalStartupCommand: nil,
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: "cmux-persistent-v1"
+        )
+
+        workspace.configureRemoteConnection(config, autoConnect: false)
+
+        // The ssh stdio transport drops and the coordinator escalates to a
+        // re-bootstrap (RemoteSessionCoordinator.handleProxyBrokerUpdateLocked).
+        let daemonError = "Remote daemon transport needs re-bootstrap after proxy failure (retry 1 in 2s)"
+        workspace.applyRemoteDaemonStatusUpdate(
+            WorkspaceRemoteDaemonStatus(state: .error, detail: daemonError),
+            target: "sandbox-vpn"
+        )
+        XCTAssertEqual(workspace.logEntries.last?.source, "remote-daemon")
+
+        // The re-bootstrap succeeds; the workspace is fully healthy again.
+        workspace.applyRemoteDaemonStatusUpdate(
+            WorkspaceRemoteDaemonStatus(state: .ready, detail: "Remote daemon ready", version: "0.64.20"),
+            target: "sandbox-vpn"
+        )
+        workspace.applyRemoteConnectionStateUpdate(
+            .connected,
+            detail: "Connected to sandbox-vpn via shared local proxy 127.0.0.1:49221",
+            target: "sandbox-vpn"
+        )
+
+        XCTAssertEqual(workspace.remoteDaemonStatus.state, .ready)
+        XCTAssertEqual(workspace.remoteConnectionState, .connected)
+        XCTAssertNil(
+            workspace.logEntries.last(where: { $0.source == "remote-daemon" }),
+            "A recovered daemon-transport bounce must not stay on the workspace row as the latest sidebar log entry"
+        )
+    }
+
+    /// The dropped-VPN repro from the issue thread, which is the shape users
+    /// actually hit: the SSH connection dies outright, so the bootstrap fails
+    /// with a timeout rather than a proxy bounce. That publishes *two* entries —
+    /// "Remote daemon error (…)" from the daemon path and "SSH error (…)" from
+    /// the connection path — and neither is proxy-only. Reconnecting must clear
+    /// both; retraction keys on a later success, not on the failure's category.
+    @MainActor
+    func testRecoveredBootstrapTimeoutClearsBothSidebarErrorLines() {
+        let workspace = Workspace()
+        let config = WorkspaceRemoteConfiguration(
+            destination: "sandbox-vpn",
+            port: nil,
+            identityFile: nil,
+            sshOptions: [],
+            localProxyPort: nil,
+            relayPort: 64907,
+            relayID: String(repeating: "c", count: 16),
+            relayToken: String(repeating: "d", count: 64),
+            localSocketPath: "/tmp/cmux-debug-test.sock",
+            terminalStartupCommand: nil,
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: "cmux-persistent-v1"
+        )
+
+        workspace.configureRemoteConnection(config, autoConnect: false)
+
+        // VPN drops: the ssh transport cannot be established at all.
+        let bootstrapError = "Remote daemon bootstrap failed: Connection to UNKNOWN port 65535 timed out (retry 1 in 4s)"
+        workspace.applyRemoteDaemonStatusUpdate(
+            WorkspaceRemoteDaemonStatus(state: .error, detail: bootstrapError),
+            target: "sandbox-vpn"
+        )
+        workspace.applyRemoteConnectionStateUpdate(.error, detail: bootstrapError, target: "sandbox-vpn")
+
+        XCTAssertNotNil(workspace.logEntries.last(where: { $0.source == "remote-daemon" }))
+        XCTAssertNotNil(workspace.logEntries.last(where: { $0.source == "remote" }))
+
+        // VPN back: the retry bootstraps cleanly and the workspace connects.
+        workspace.applyRemoteDaemonStatusUpdate(
+            WorkspaceRemoteDaemonStatus(state: .ready, detail: "Remote daemon ready", version: "0.64.20"),
+            target: "sandbox-vpn"
+        )
+        workspace.applyRemoteConnectionStateUpdate(
+            .connected,
+            detail: "Connected to sandbox-vpn via shared local proxy 127.0.0.1:49221",
+            target: "sandbox-vpn"
+        )
+
+        XCTAssertEqual(workspace.remoteConnectionState, .connected)
+        XCTAssertNil(workspace.statusEntries["remote.error"])
+        XCTAssertNil(
+            workspace.logEntries.last(where: { $0.source == "remote-daemon" }),
+            "The daemon bootstrap error must not survive a successful reconnect"
+        )
+        XCTAssertNil(
+            workspace.logEntries.last(where: { $0.source == "remote" }),
+            "The SSH error line must not survive a successful reconnect"
+        )
+    }
+
+    /// Guards the retraction against over-reach. Connecting supersedes the
+    /// connection-lifecycle sources only; `remote-forward` port conflicts and
+    /// unrelated sidebar entries describe state that connecting says nothing
+    /// about, so they must survive.
+    @MainActor
+    func testConnectingDoesNotClearUnrelatedSidebarLogEntries() {
+        let workspace = Workspace()
+        let config = WorkspaceRemoteConfiguration(
+            destination: "sandbox-vpn",
+            port: nil,
+            identityFile: nil,
+            sshOptions: [],
+            localProxyPort: nil,
+            relayPort: 64908,
+            relayID: String(repeating: "c", count: 16),
+            relayToken: String(repeating: "d", count: 64),
+            localSocketPath: "/tmp/cmux-debug-test.sock",
+            terminalStartupCommand: nil,
+            preserveAfterTerminalExit: true,
+            persistentDaemonSlot: "cmux-persistent-v1"
+        )
+
+        workspace.configureRemoteConnection(config, autoConnect: false)
+
+        workspace.logEntries.append(
+            SidebarLogEntry(
+                message: "Port conflicts while forwarding sandbox-vpn: 3000",
+                level: .warning,
+                source: "remote-forward",
+                timestamp: Date()
+            )
+        )
+        workspace.logEntries.append(
+            SidebarLogEntry(
+                message: "Agent finished",
+                level: .info,
+                source: "agent",
+                timestamp: Date()
+            )
+        )
+
+        workspace.applyRemoteConnectionStateUpdate(
+            .connected,
+            detail: "Connected to sandbox-vpn via shared local proxy 127.0.0.1:49221",
+            target: "sandbox-vpn"
+        )
+
+        XCTAssertNotNil(
+            workspace.logEntries.last(where: { $0.source == "remote-forward" }),
+            "Port-conflict warnings describe forwarding state, not whether the connection came up"
+        )
+        XCTAssertNotNil(
+            workspace.logEntries.last(where: { $0.source == "agent" }),
+            "Non-remote sidebar log entries must be untouched"
+        )
+    }
 }
 
 final class CLINotifyProcessIntegrationTests: XCTestCase {
